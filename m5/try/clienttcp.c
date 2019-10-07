@@ -10,8 +10,6 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <ctype.h>
-#include <poll.h>
-
 
 // Client questionne serveur lancé avec netcast, serveur lancé sur un terminal à part puis
 // éxécute ce programme pour lui envoyer un message

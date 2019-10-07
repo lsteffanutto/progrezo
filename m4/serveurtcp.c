@@ -10,21 +10,30 @@
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <ctype.h>
+#include <poll.h>
+#include <errno.h>
+
+#define MAX_CLIENTS 1024
 
 // Client questionne serveur lancé avec netcast, serveur lancé sur un terminal à part puis
 // éxécute ce programme pour lui envoyer un message
 
+//***** SERVEUR EVENEMENTIEL avec poll **************
+// https://www.ibm.com/support/knowledgecenter/ssw_ibm_i_71/rzab6/poll.htm
 
-//****** CREER SERVEUR DEDIE A UN CLIENT ****//
 int main(int argc, char const *argv[]) {
 
   // défini les var
 
   int sock;
   struct sockaddr_in servaddr, cliaddr;
+  int end_server, dedisock, close_conn, lenrc, k, l, m;
+
+  //Oninitialise poll()
 
   //char* hello = "Hey ! What's up serveur ?";
-  char* hello1 = "J'ai bien reçu ton msg, voila ta réponse \n";
+  char* hello1 = "Salut c'est le serveur, j'ai bien reçu ton msg, voila ta réponse ;) \n";
+  char* buffer = "Wesh le iencli";
 
   // initialise socket et vérifie pas d'erreur
 
@@ -60,25 +69,186 @@ int main(int argc, char const *argv[]) {
   //**** a utiliser pour contacter n'importe quelle machine
   //*** si plusieurs processus c seul fonction qui marche
 
-  int n, len=100;
-  int dedisock = accept( sock,(struct sockaddr*)&servaddr, (socklen_t*)&len);
-  //***** ACCETPT + SERVEUR DEDIE
+  struct pollfd pollfds[MAX_CLIENTS];
+  memset(pollfds, 0, MAX_CLIENTS * sizeof(struct pollfd) );
+
+  pollfds[0].fd = sock;
+  pollfds[0].events = POLLIN;
+
+  int timeout = -1;
+  int nfds = 1;
+  int compress_array = 0;
+
+  // boucle infini pour voir si on a eu des évenements
+  // si se passe un truc faut ajouter le descripteur pour l'écouter avec accepter
+  // sinon faut rcv le msg
+
+  while(1){
+
+    printf("Waiting on poll()...\n");
+    int rc = poll(pollfds, nfds, timeout);
+
+    //contrôle d'erreur sur le poll
+    if (rc < 0)
+    {
+      perror("  poll() failed");
+      break;
+    }
+
+    //On regarde les demandes de connexions pour voir laquelle est active
+
+    int size = nfds;
+    int j = 0;
+
+    for (j = 0; j < size; j++)
+    {
+      if(pollfds[j].revents == 0)
+      continue;
+
+      //if revents is not POLLIN
+      if(pollfds[j].revents != POLLIN)
+      {
+        printf("  Error! revents = %d\n", pollfds[j].revents);
+        int end_server = 1;
+        break;
+
+      }
+
+      //Si par contre le descripteur est en activité:
+
+      if(pollfds[j].fd == sock)
+      {
+        printf(" Listening socket is readable\n");
+
+        // et là on va accepter toutes les connexions qui attendent
+        // avant de refaire un poll sa mère
+
+        do {
+          dedisock = accept( sock, NULL, NULL);
+          if ( dedisock < 0 )
+          {
+            if(errno != EWOULDBLOCK)
+            {
+              perror( " accept() failed");
+              end_server = 1;
+            }
+          break;
+          }
+
+          // on ajoute la nouvelle connection à la structure pollfds
+          printf("  New incoming connection - %d\n", dedisock);
+          pollfds[nfds].fd = dedisock;
+          pollfds[nfds].events = POLLIN;
+          nfds++;
+
+          // Puis on peut accepter de nouvelles connexions
+
+        } while( dedisock != -1);
+
+      }
+
+      else
+      {
+        printf("  Descriptor %d is readable\n", pollfds[j].fd);
+        close_conn = 0;
+
+        //On veut recevoir les datas de cette socket avant de relancer poll
+        do {
+
+          rc = recv(pollfds[j].fd, buffer, sizeof(buffer), 0);
+          if (rc < 0)
+          {
+            if (errno != EWOULDBLOCK)
+            {
+              perror("  recv() failed");
+              close_conn = 1;
+            }
+            break;
+          }
+
+          if (rc == 0)
+          {
+            printf("Connection closed\n");
+            close_conn = 1;
+            break;
+          }
+
+          lenrc = rc;
+          printf("%d bytes received\n", lenrc );
+
+          rc = send(pollfds[j].fd, buffer, lenrc, 0);
+
+          if (rc < 0 )
+          {
+            perror(" send() failed");
+            close_conn = 1;
+            break;
+          }
+
+        } while(1);
+
+        if (close_conn)
+        {
+          close(pollfds[j].fd);
+          pollfds[j].fd = -1;
+          compress_array = 1;
+        }
+
+      //fin else
+      }
 
 
-  // On crée un buffer pour stocker le message
-  char bufferstock[100];
-  int messagerecu = recv(dedisock,bufferstock, sizeof(bufferstock),0);
-  //***** RECVFROM = UDP FDP
 
-  printf("%s", bufferstock);
-  int i=0;
 
-  // for(i=0; i<strlen(bufferstock); i++){
-  //   bufferstock[i] = toupper(bufferstock[i]);
-  // }
+    // fin for
+    }
 
-  send(dedisock, (const char*) hello1, strlen(hello1), 0);
-  send(dedisock, (const char*) bufferstock, strlen(bufferstock), 0);
+    if (compress_array)
+    {
+      compress_array = 0;
+      for (k = 0; k < nfds; k++)
+      {
+        if (pollfds[k].fd == -1)
+        {
+          for(l = k; l < nfds; l++)
+          {
+            pollfds[l].fd = pollfds[l+1].fd;
+          }
+          k--;
+          nfds--;
+        }
+      }
+    }
+
+    for (m = 0; m < nfds; m++)
+    {
+      if(pollfds[m].fd >= 0)
+        close(pollfds[m].fd);
+    }
+
+
+
+  }
+
+
+  // int n, len=100;
+  // //***** ACCETPT + SERVEUR DEDIE
+  //
+  //
+  // // On crée un buffer pour stocker le message
+  // char bufferstock[100];
+  // int messagerecu = recv(dedisock,bufferstock, sizeof(bufferstock),0);
+  // //***** RECVFROM = UDP FDP
+  //
+  // printf("Le message reçu du client est:\n)");
+  // printf("%s\n", bufferstock);
+  // int i=0;
+  //
+  // // for(i=0; i<strlen(bufferstock); i++){
+  // //   bufferstock[i] = toupper(bufferstock[i]);
+  // // }
+  // send(dedisock, (const char*) hello1, strlen(hello1), 0);
+  // send(dedisock, (const char*) bufferstock, strlen(bufferstock), 0);
 
 
 
@@ -86,7 +256,6 @@ int main(int argc, char const *argv[]) {
 
   //strupr = prend char* et la converti en majuscule
 
-  printf("Hello message receive.\n)");
 
 
   close(sock);
